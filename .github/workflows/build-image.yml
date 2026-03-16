@@ -1,9 +1,9 @@
-name: Build Debian 13 ARM64 Cloud Image
+name: Build Debian 13 amd64 Cloud Image
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 3 1 * *'
+    - cron: '0 3 * * 1'
 
 jobs:
   build:
@@ -48,7 +48,7 @@ jobs:
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: debian-13-arm64-cloudimg
+          name: debian-13-amd64-cloudimg
           path: |
             out/*.qcow2.xz
             out/*.qcow2.xz.sha256
