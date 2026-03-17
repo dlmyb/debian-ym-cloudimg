@@ -3,11 +3,14 @@ set -euo pipefail
 
 DEBIAN_VER=13
 ARCH=amd64
-BASE_IMG="debian-${DEBIAN_VER}-generic-${ARCH}.qcow2"
+BASE_IMG="debian-${DEBIAN_VER}-genericcloud-${ARCH}.qcow2"
 BASE_URL="https://cloud.debian.org/images/cloud/trixie/latest/${BASE_IMG}"
-OUT_IMG="debian-${DEBIAN_VER}-custom-${ARCH}.qcow2"
+OUT_QCOW2="debian-${DEBIAN_VER}-custom-${ARCH}.qcow2"
+OUT_RAW="debian-${DEBIAN_VER}-custom-${ARCH}.raw"
 DOCKER_GPG_URL="https://download.docker.com/linux/debian/gpg"
 DOCKER_REPO='deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/debian trixie stable'
+NODE_VER="$(curl -fsSL https://nodejs.org/dist/index.json | jq -r '[.[] | select(.lts)][0].version')"
+NODE_URL="https://nodejs.org/dist/${NODE_VER}/node-${NODE_VER}-linux-x64.tar.xz"
 
 ROOT_PUBKEY_FILE="$(realpath "${ROOT_PUBKEY_FILE:-root.pub}")"
 ROOT_CFG_FILE="$(realpath "${ROOT_CFG_FILE:-files/99-root-login.cfg}")"
@@ -27,10 +30,10 @@ require_file "$ROOT_CFG_FILE"
 mkdir -p "$WORKDIR"
 cd "$WORKDIR"
 
-# rm -f "$BASE_IMG" "$OUT_IMG" "$OUT_IMG.xz" "$OUT_IMG.xz.sha256"
-# curl -fL "$BASE_URL" -o "$BASE_IMG"
+rm -f "$BASE_IMG" "$OUT_QCOW2" "$OUT_RAW" "$OUT_RAW.xz" "$OUT_RAW.xz.sha256"
+curl -fL "$BASE_URL" -o "$BASE_IMG"
 
-cp "$BASE_IMG" "$OUT_IMG"
+cp "$BASE_IMG" "$OUT_QCOW2"
 
 # --- Build cloud-init NoCloud ISO ---
 CIDIR="$(mktemp -d)"
@@ -66,7 +69,8 @@ runcmd:
   - chown -R root:root /root/.ssh
   - userdel -r debian || true
   - apt-get update
-  - apt-get install -y ca-certificates curl gnupg git vim wireguard rsync
+  - echo "iperf3 iperf3/start_daemon boolean false" | debconf-set-selections
+  - apt-get install -y ca-certificates curl gnupg jq git vim wireguard rsync python3-venv python3-pip iperf3 bind9-dnsutils
   - install -m 0755 -d /etc/apt/keyrings
   - curl -fsSL ${DOCKER_GPG_URL} | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
   - chmod a+r /etc/apt/keyrings/docker.gpg
@@ -74,11 +78,21 @@ runcmd:
   - apt-get update
   - apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
   - systemctl enable docker || true
-  - git clone --depth=1 https://github.com/ohmybash/oh-my-bash.git /root/.oh-my-bash
-  - cp /root/.oh-my-bash/templates/bashrc.osh-template /root/.bashrc
-  - grep -q "^export OSH=" /root/.bashrc || echo "export OSH=/root/.oh-my-bash" >> /root/.bashrc
-  - sed -i 's|^OSH_THEME=.*|OSH_THEME="font"|' /root/.bashrc
+  - git clone --depth=1 https://github.com/ohmybash/oh-my-bash.git /usr/local/share/oh-my-bash
+  - cp /usr/local/share/oh-my-bash/templates/bashrc.osh-template /root/.bashrc
+  - sed -i 's|^OSH=.*|OSH=/usr/local/share/oh-my-bash|' /root/.bashrc
+  - sed -i 's|^OSH_THEME=.*|OSH_THEME="vscode"|' /root/.bashrc
   - printf '\nexport PATH=\$PATH:/usr/local/bin\n' >> /root/.bashrc
+  - echo 'PROMPT_COMMAND='"'"'echo -en "\033]0;\$(whoami)@\$(hostname)\a"'"'"'' >> /root/.bashrc
+  # Use classic eth0 naming instead of ens*
+  - sed -i 's|^GRUB_CMDLINE_LINUX_DEFAULT=.*|GRUB_CMDLINE_LINUX_DEFAULT="net.ifnames=0 biosdevname=0"|' /etc/default/grub
+  - sed -i 's|^GRUB_CMDLINE_LINUX=.*|GRUB_CMDLINE_LINUX="net.ifnames=0 biosdevname=0"|' /etc/default/grub
+  - update-grub
+  # Node.js LTS (system-wide via official binary tarball)
+  - curl -fsSL ${NODE_URL} | tar -xJ --strip-components=1 -C /usr/local
+  # Codex and Claude
+  - npm install -g @openai/codex
+  - npm install -g @anthropic-ai/claude-code
 
 power_state:
   mode: poweroff
@@ -98,20 +112,24 @@ qemu-system-x86_64 \
   -m 2048 \
   -cpu host \
   -nographic \
-  -drive file="$OUT_IMG",format=qcow2,if=virtio \
+  -drive file="$OUT_QCOW2",format=qcow2,if=virtio \
   -drive file="$SEED_ISO",format=raw,if=virtio \
   -netdev user,id=net0 \
   -device virtio-net-pci,netdev=net0
 
-echo "QEMU exited. Cleaning up seed ISO..."
+echo "QEMU exited."
 rm -f "$SEED_ISO"
 
 # --- Sysprep the image (offline, no network needed) ---
-virt-sysprep -a "$OUT_IMG" \
+virt-sysprep -a "$OUT_QCOW2" \
   --operations machine-id,ssh-hostkeys,tmp-files,logfiles,package-manager-cache
 
-xz -T0 -z -9 "$OUT_IMG"
-sha256sum "$OUT_IMG.xz" > "$OUT_IMG.xz.sha256"
+# --- Convert qcow2 to raw ---
+qemu-img convert -f qcow2 -O raw "$OUT_QCOW2" "$OUT_RAW"
+rm -f "$OUT_QCOW2"
+
+xz -T0 -z "$OUT_RAW"
+sha256sum "$OUT_RAW.xz" > "$OUT_RAW.xz.sha256"
 
 echo "Built artifacts:"
-ls -lh "$OUT_IMG.xz" "$OUT_IMG.xz.sha256"
+ls -lh "$OUT_RAW.xz" "$OUT_RAW.xz.sha256"
