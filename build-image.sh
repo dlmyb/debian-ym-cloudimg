@@ -70,7 +70,7 @@ runcmd:
   - userdel -r debian || true
   - apt-get update
   - echo "iperf3 iperf3/start_daemon boolean false" | debconf-set-selections
-  - apt-get install -y ca-certificates curl gnupg jq git vim wireguard rsync python3-venv python3-pip iperf3 bind9-dnsutils
+  - apt-get install -y ca-certificates curl gnupg jq git vim wireguard rsync python3-venv python3-pip iperf3 bind9-dnsutils qemu-guest-agent
   - install -m 0755 -d /etc/apt/keyrings
   - curl -fsSL ${DOCKER_GPG_URL} | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
   - chmod a+r /etc/apt/keyrings/docker.gpg
@@ -93,6 +93,7 @@ runcmd:
   # Codex and Claude
   - npm install -g @openai/codex
   - npm install -g @anthropic-ai/claude-code
+  - systemctl enable qemu-guest-agent || true
 
 power_state:
   mode: poweroff

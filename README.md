@@ -12,6 +12,7 @@ This repo builds a customized Debian 13 amd64 cloud image from the official `deb
   - `wireguard`
   - `rsync`
   - `git`
+  - `qemu-guest-agent`
   - `oh-my-bash`
 - the stock `debian` user is removed if present
 - `virt-sysprep` cleans machine identity before publishing
