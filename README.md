@@ -19,6 +19,7 @@ This repo builds customized Debian 13 amd64 cloud images from a fresh `debootstr
 - `files/99-root-login.cfg` is the cloud-init override
 - `files/resolv.conf` is copied into `/etc/resolv.conf` and locked immutable in each image
 - `scripts/` is copied into `/root/scripts` inside each image
+- `reinstall/` is a git submodule for the upstream reinstall project used with the generated raw images
 
 ## Local build
 
@@ -86,8 +87,9 @@ Both builders assume a BIOS/QEMU boot path with `grub-pc`.
 Both builders also copy the repository `scripts/` directory into `/root/scripts` inside the image.
 If `/root/scripts/install-bundle.sh` exists, both builders register it in root's crontab with `@reboot`; it waits 5 minutes, runs once, and removes its own crontab entry when finished.
 Both builders also copy `files/resolv.conf` into `/etc/resolv.conf` and mark it immutable.
+The repository also vendors the upstream `reinstall` project as a submodule in `reinstall/` for reference and integration with the produced raw images.
 
 ## Notes
 
-- The output image is `raw`, compressed with `xz`, in order to works with [reinstall script](https://github.com/bin456789/reinstall/tree/main)
+- The output image is `raw`, compressed with `xz`, in order to works with [reinstall script](https://github.com/bin456789/reinstall.git), which is a submodule of this repo 
 - `root` login is key-only by default; no root password is set
