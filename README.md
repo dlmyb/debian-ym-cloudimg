@@ -40,8 +40,8 @@ EOF
 Run the build:
 
 ```bash
-chmod +x run-local.sh
-./run-local.sh
+chmod +x build-image-ext4.sh
+./build-image-ext4.sh
 ```
 
 Artifacts are written to `out/`.

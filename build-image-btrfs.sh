@@ -16,6 +16,7 @@ RESOLV_CONF_FILE="$(realpath "${RESOLV_CONF_FILE:-files/resolv.conf}")"
 SCRIPTS_DIR="$(realpath "${SCRIPTS_DIR:-scripts}")"
 WORKDIR="${WORKDIR:-$PWD/out}"
 HOSTNAME="${HOSTNAME:-build}"
+IMAGE_LOCALE="${IMAGE_LOCALE:-en_US.UTF-8}"
 MOUNT_DIR=""
 NBD_DEV=""
 
@@ -246,12 +247,19 @@ mount_bind /proc "${MOUNT_DIR}/proc"
 mount_bind /sys "${MOUNT_DIR}/sys"
 mount_bind /run "${MOUNT_DIR}/run"
 
-ROOT_UUID="${ROOT_UUID}" \
-BOOT_UUID="${BOOT_UUID}" \
-NBD_DEV="${NBD_DEV}" \
-chroot "${MOUNT_DIR}" /bin/bash <<'CHROOT'
+env -i \
+  HOME=/root \
+  PATH=/usr/sbin:/usr/bin:/sbin:/bin \
+  TERM="${TERM:-xterm}" \
+  DEBIAN_FRONTEND=noninteractive \
+  LANG=C.UTF-8 \
+  LC_ALL=C.UTF-8 \
+  ROOT_UUID="${ROOT_UUID}" \
+  BOOT_UUID="${BOOT_UUID}" \
+  NBD_DEV="${NBD_DEV}" \
+  IMAGE_LOCALE="${IMAGE_LOCALE}" \
+  chroot "${MOUNT_DIR}" /bin/bash <<'CHROOT'
 set -euo pipefail
-export DEBIAN_FRONTEND=noninteractive
 
 apt-get update
 apt-get install -y \
@@ -264,9 +272,15 @@ apt-get install -y \
   grub-pc \
   initramfs-tools \
   linux-image-cloud-amd64 \
+  locales \
   openssh-server \
   qemu-guest-agent \
   sudo
+
+printf '%s UTF-8\n' "${IMAGE_LOCALE}" > /etc/locale.gen
+locale-gen
+update-locale LANG="${IMAGE_LOCALE}" LC_ALL="${IMAGE_LOCALE}"
+export LANG="${IMAGE_LOCALE}" LC_ALL="${IMAGE_LOCALE}"
 
 systemctl enable systemd-networkd
 systemctl enable cron
