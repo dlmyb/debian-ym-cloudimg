@@ -5,8 +5,8 @@ DEBIAN_VER=13
 DEBIAN_SUITE=trixie
 ARCH=amd64
 DISK_SIZE="${DISK_SIZE:-5G}"
-OUT_QCOW2="debian-${DEBIAN_VER}-btrfs-${ARCH}.qcow2"
-OUT_RAW="debian-${DEBIAN_VER}-btrfs-${ARCH}.raw"
+OUT_QCOW2="debian-${DEBIAN_VER}-ext4-${ARCH}.qcow2"
+OUT_RAW="debian-${DEBIAN_VER}-ext4-${ARCH}.raw"
 DOCKER_GPG_URL="https://download.docker.com/linux/debian/gpg"
 DOCKER_REPO='deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/debian trixie stable'
 
@@ -46,7 +46,7 @@ cleanup() {
   set +e
 
   if [[ -n "${MOUNT_DIR}" ]]; then
-    for path in dev/pts dev proc sys run boot var/log home .snapshots; do
+    for path in dev/pts dev proc sys run boot; do
       if mountpoint -q "${MOUNT_DIR}/${path}"; then
         umount "${MOUNT_DIR}/${path}"
       fi
@@ -66,7 +66,7 @@ cleanup() {
 
 release_image() {
   if [[ -n "${MOUNT_DIR}" ]]; then
-    for path in dev/pts dev proc sys run boot var/log home .snapshots; do
+    for path in dev/pts dev proc sys run boot; do
       if mountpoint -q "${MOUNT_DIR}/${path}"; then
         umount "${MOUNT_DIR}/${path}"
       fi
@@ -118,12 +118,9 @@ if [[ ! -d "${SCRIPTS_DIR}" ]]; then
 fi
 
 for cmd in \
-  btrfs \
   blkid \
   chroot \
   debootstrap \
-  lsblk \
-  mkfs.btrfs \
   mkfs.ext4 \
   mount \
   parted \
@@ -148,7 +145,7 @@ attach_nbd "${OUT_QCOW2}"
 parted -s "${NBD_DEV}" -- \
   mklabel msdos \
   mkpart primary ext4 1MiB 1025MiB \
-  mkpart primary btrfs 1025MiB 100% \
+  mkpart primary ext4 1025MiB 100% \
   set 1 boot on
 
 partprobe "${NBD_DEV}"
@@ -158,23 +155,12 @@ BOOT_PART="${NBD_DEV}p1"
 ROOT_PART="${NBD_DEV}p2"
 
 mkfs.ext4 -F -L boot "${BOOT_PART}"
-mkfs.btrfs -f -L rootfs "${ROOT_PART}"
+mkfs.ext4 -F -L rootfs "${ROOT_PART}"
 
 MOUNT_DIR="$(mktemp -d)"
 mount "${ROOT_PART}" "${MOUNT_DIR}"
-btrfs subvolume create "${MOUNT_DIR}/@"
-btrfs subvolume create "${MOUNT_DIR}/@home"
-btrfs subvolume create "${MOUNT_DIR}/@var_log"
-btrfs subvolume create "${MOUNT_DIR}/@snapshots"
-btrfs subvolume set-default "$(btrfs subvolume list "${MOUNT_DIR}" | awk '/ path @$/ {print $2}')" "${MOUNT_DIR}"
-umount "${MOUNT_DIR}"
-
-mount -o subvol=@,compress=zstd,noatime "${ROOT_PART}" "${MOUNT_DIR}"
-mkdir -p "${MOUNT_DIR}/boot" "${MOUNT_DIR}/home" "${MOUNT_DIR}/var/log" "${MOUNT_DIR}/.snapshots"
+mkdir -p "${MOUNT_DIR}/boot"
 mount "${BOOT_PART}" "${MOUNT_DIR}/boot"
-mount -o subvol=@home,compress=zstd,noatime "${ROOT_PART}" "${MOUNT_DIR}/home"
-mount -o subvol=@var_log,compress=zstd,noatime "${ROOT_PART}" "${MOUNT_DIR}/var/log"
-mount -o subvol=@snapshots,compress=zstd,noatime "${ROOT_PART}" "${MOUNT_DIR}/.snapshots"
 
 debootstrap --arch="${ARCH}" --components=main,contrib,non-free-firmware "${DEBIAN_SUITE}" "${MOUNT_DIR}" "https://deb.debian.org/debian"
 
@@ -190,11 +176,8 @@ deb https://deb.debian.org/debian-security ${DEBIAN_SUITE}-security main contrib
 EOF
 
 cat > "${MOUNT_DIR}/etc/fstab" <<EOF
-UUID=${BOOT_UUID}  /boot       ext4   defaults                           0 2
-UUID=${ROOT_UUID}  /           btrfs  subvol=@,compress=zstd,noatime     0 0
-UUID=${ROOT_UUID}  /home       btrfs  subvol=@home,compress=zstd,noatime 0 0
-UUID=${ROOT_UUID}  /var/log    btrfs  subvol=@var_log,compress=zstd,noatime 0 0
-UUID=${ROOT_UUID}  /.snapshots btrfs  subvol=@snapshots,compress=zstd,noatime 0 0
+UUID=${ROOT_UUID}  /      ext4  defaults,noatime  0 1
+UUID=${BOOT_UUID}  /boot  ext4  defaults          0 2
 EOF
 
 echo "${HOSTNAME}" > "${MOUNT_DIR}/etc/hostname"
@@ -246,8 +229,6 @@ mount_bind /proc "${MOUNT_DIR}/proc"
 mount_bind /sys "${MOUNT_DIR}/sys"
 mount_bind /run "${MOUNT_DIR}/run"
 
-ROOT_UUID="${ROOT_UUID}" \
-BOOT_UUID="${BOOT_UUID}" \
 NBD_DEV="${NBD_DEV}" \
 chroot "${MOUNT_DIR}" /bin/bash <<'CHROOT'
 set -euo pipefail
@@ -255,7 +236,6 @@ export DEBIAN_FRONTEND=noninteractive
 
 apt-get update
 apt-get install -y \
-  btrfs-progs \
   ca-certificates \
   cloud-init \
   cloud-guest-utils \

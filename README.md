@@ -1,29 +1,24 @@
 # Debian 13 amd64 Cloud Image Builder
 
-This repo builds a customized Debian 13 amd64 cloud image from the official `debian-13-genericcloud-amd64.qcow2` base image.
+This repo builds customized Debian 13 amd64 cloud images from a fresh `debootstrap` install, then provisions them offline through a chroot stage.
 
-## Included customizations
+## Base image contents
 
 - `root` is the intended default login user through cloud-init
 - your SSH public key is installed into `/root/.ssh/authorized_keys`
 - packages installed:
-  - Docker CE + CLI + Buildx + Compose plugin
-  - `vim`
-  - `wireguard`
-  - `rsync`
-  - `git`
+  - `cloud-init`
+  - `openssh-server`
   - `qemu-guest-agent`
-  - `oh-my-bash`
-- the stock `debian` user is removed if present
 - `virt-sysprep` cleans machine identity before publishing
 
 ## Files
 
-- `build-image.sh` builds the image locally or on CI
-- `build-image-btrfs.sh` drafts a fresh Debian-on-btrfs image builder
-- `run-local.sh` is a thin local helper
+- `build-image-ext4.sh` builds the ext4 image locally or on CI
+- `build-image-btrfs.sh` builds the btrfs image locally
 - `files/99-root-login.cfg` is the cloud-init override
-- `.github/workflows/build-image.yml` builds on a self-hosted GitHub Actions runner
+- `files/resolv.conf` is copied into `/etc/resolv.conf` and locked immutable in each image
+- `scripts/` is copied into `/root/scripts` inside each image
 
 ## Local build
 
@@ -31,7 +26,7 @@ Install dependencies on your Linux builder:
 
 ```bash
 sudo apt-get update
-sudo apt-get install -y libguestfs-tools qemu-utils curl jq xz-utils debootstrap parted btrfs-progs genisoimage
+sudo apt-get install -y libguestfs-tools qemu-utils xz-utils debootstrap parted btrfs-progs
 ```
 
 Add your SSH public key:
@@ -51,9 +46,25 @@ chmod +x run-local.sh
 
 Artifacts are written to `out/`.
 
-## Btrfs build draft
+## Ext4 build
 
-The new `build-image-btrfs.sh` script takes Option A: it creates a fresh disk image, formats the root filesystem as `btrfs`, creates subvolumes, bootstraps Debian with `debootstrap`, then boots the guest once with NoCloud data to apply the same package customizations.
+The `build-image-ext4.sh` script creates a fresh disk image, provisions Debian with `debootstrap`, customizes it in a chroot, and writes `debian-13-ext4-amd64.raw.xz` into `out/`.
+
+Current layout:
+
+- `/boot` on `ext4`
+- `/` on `ext4`
+
+Run it with:
+
+```bash
+sudo chmod +x build-image-ext4.sh
+sudo ./build-image-ext4.sh
+```
+
+## Btrfs build
+
+The `build-image-btrfs.sh` script creates a fresh disk image, formats the root filesystem as `btrfs`, creates subvolumes, bootstraps Debian with `debootstrap`, customizes it in a chroot, and writes `debian-13-btrfs-amd64.raw.xz` into `out/`.
 
 Current layout:
 
@@ -70,22 +81,13 @@ sudo chmod +x build-image-btrfs.sh
 sudo ./build-image-btrfs.sh
 ```
 
-Notes:
+Both builders assume a BIOS/QEMU boot path with `grub-pc`.
 
-- it is a first draft and has not been validated end-to-end in CI yet
-- it assumes a BIOS/QEMU boot path with `grub-pc`
-- it writes `debian-13-btrfs-amd64.raw.xz` artifacts into `out/`
-
-## GitHub Actions
-
-Set this repository secret:
-
-- `ROOT_PUBKEY` � your SSH public key contents
-
-The workflow writes `root.pub`, creates `files/99-root-login.cfg`, runs `build-image.sh`, and uploads the compressed image artifacts.
+Both builders also copy the repository `scripts/` directory into `/root/scripts` inside the image.
+If `/root/scripts/install-bundle.sh` exists, both builders register it in root's crontab with `@reboot`; it waits 5 minutes, runs once, and removes its own crontab entry when finished.
+Both builders also copy `files/resolv.conf` into `/etc/resolv.conf` and mark it immutable.
 
 ## Notes
 
-- The output image is `qcow2`, compressed with `xz`
-- The workflow is configured for a `self-hosted` runner
+- The output image is `raw`, compressed with `xz`, in order to works with [reinstall script](https://github.com/bin456789/reinstall/tree/main)
 - `root` login is key-only by default; no root password is set
