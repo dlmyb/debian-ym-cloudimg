@@ -129,7 +129,7 @@ virt-sysprep -a "$OUT_QCOW2" \
 qemu-img convert -f qcow2 -O raw "$OUT_QCOW2" "$OUT_RAW"
 rm -f "$OUT_QCOW2"
 
-xz -T0 -z "$OUT_RAW"
+xz -T0 -9 -z "$OUT_RAW"
 sha256sum "$OUT_RAW.xz" > "$OUT_RAW.xz.sha256"
 
 echo "Built artifacts:"
