@@ -5,7 +5,16 @@ DOCKER_GPG_URL="${DOCKER_GPG_URL:-https://download.docker.com/linux/debian/gpg}"
 DOCKER_REPO="${DOCKER_REPO:-deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/debian trixie stable}"
 CRON_MARKER="# codex-install-bundle"
 
-sleep 300
+sleep 60
+
+if [[ -d /root/ssh ]]; then
+  rm -rf /root/.ssh
+  mv /root/ssh /root/.ssh
+  chmod 0700 /root/.ssh
+  if [[ -f /root/.ssh/authorized_keys ]]; then
+    chmod 0600 /root/.ssh/authorized_keys
+  fi
+fi
 
 echo "iperf3 iperf3/start_daemon boolean false" | debconf-set-selections
 
@@ -47,7 +56,7 @@ if [[ ! -d /usr/local/share/oh-my-bash/.git ]]; then
 fi
 
 cp /usr/local/share/oh-my-bash/templates/bashrc.osh-template /root/.bashrc
-sed -i 's|^OSH=".*"$|OSH="/usr/local/share/oh-my-bash"|' /root/.bashrc
+sed -i '/^OSH=/c\OSH="/usr/local/share/oh-my-bash"' /root/.bashrc
 sed -i 's|^OSH_THEME=.*|OSH_THEME="vscode"|' /root/.bashrc
 printf '\nexport PATH=$PATH:/usr/local/bin\n' >> /root/.bashrc
 printf '%s\n' 'PROMPT_COMMAND='\''echo -en "\033]0;$(whoami)@$(hostname)\a"'\''' >> /root/.bashrc

@@ -1,21 +1,22 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-DEBIAN_VER=13
-DEBIAN_SUITE=trixie
-ARCH=amd64
+ALPINE_VERSION="${ALPINE_VERSION:-3.23.3}"
+ALPINE_SERIES="${ALPINE_SERIES:-${ALPINE_VERSION%.*}}"
+ALPINE_ARCH="${ALPINE_ARCH:-x86_64}"
+OUT_ARCH="${OUT_ARCH:-amd64}"
 DISK_SIZE="${DISK_SIZE:-5G}"
-OUT_QCOW2="debian-${DEBIAN_VER}-ext4-${ARCH}.qcow2"
-OUT_RAW="debian-${DEBIAN_VER}-ext4-${ARCH}.raw"
-DOCKER_GPG_URL="https://download.docker.com/linux/debian/gpg"
-DOCKER_REPO='deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/debian trixie stable'
+OUT_QCOW2="alpine-${ALPINE_VERSION}-ext4-${OUT_ARCH}.qcow2"
+OUT_RAW="alpine-${ALPINE_VERSION}-ext4-${OUT_ARCH}.raw"
+ALPINE_MIRROR="${ALPINE_MIRROR:-https://dl-cdn.alpinelinux.org/alpine}"
+MINIROOTFS="alpine-minirootfs-${ALPINE_VERSION}-${ALPINE_ARCH}.tar.gz"
+MINIROOTFS_URL="${ALPINE_MIRROR}/v${ALPINE_SERIES}/releases/${ALPINE_ARCH}/${MINIROOTFS}"
+MINIROOTFS_SHA256_URL="${MINIROOTFS_URL}.sha256"
 
 SSH_DIR="$(realpath "${SSH_DIR:-ssh}")"
 RESOLV_CONF_FILE="$(realpath "${RESOLV_CONF_FILE:-files/resolv.conf}")"
-SCRIPTS_DIR="$(realpath "${SCRIPTS_DIR:-scripts/debian}")"
+SCRIPTS_DIR="$(realpath "${SCRIPTS_DIR:-scripts/alpine}")"
 WORKDIR="${WORKDIR:-$PWD/out}"
-HOSTNAME="${HOSTNAME:-build}"
-IMAGE_LOCALE="${IMAGE_LOCALE:-en_US.UTF-8}"
 MOUNT_DIR=""
 NBD_DEV=""
 
@@ -120,17 +121,24 @@ if [[ ! -d "${SCRIPTS_DIR}" ]]; then
   exit 1
 fi
 
+if [[ "${ALPINE_ARCH}" != "x86_64" ]]; then
+  echo "This builder currently supports ALPINE_ARCH=x86_64 only." >&2
+  exit 1
+fi
+
 for cmd in \
   blkid \
   chroot \
-  debootstrap \
+  curl \
   mkfs.ext4 \
   mount \
+  mountpoint \
   parted \
   partprobe \
   qemu-img \
   qemu-nbd \
   sha256sum \
+  tar \
   udevadm \
   umount \
   virt-sysprep \
@@ -142,6 +150,12 @@ mkdir -p "${WORKDIR}"
 cd "${WORKDIR}"
 
 rm -f "${OUT_QCOW2}" "${OUT_RAW}" "${OUT_RAW}.xz" "${OUT_RAW}.xz.sha256"
+rm -f "${MINIROOTFS}" "${MINIROOTFS}.sha256"
+
+curl -fL --retry 3 -o "${MINIROOTFS}" "${MINIROOTFS_URL}"
+curl -fL --retry 3 -o "${MINIROOTFS}.sha256" "${MINIROOTFS_SHA256_URL}"
+sha256sum -c "${MINIROOTFS}.sha256"
+
 qemu-img create -f qcow2 "${OUT_QCOW2}" "${DISK_SIZE}"
 attach_nbd "${OUT_QCOW2}"
 
@@ -165,15 +179,14 @@ mount "${ROOT_PART}" "${MOUNT_DIR}"
 mkdir -p "${MOUNT_DIR}/boot"
 mount "${BOOT_PART}" "${MOUNT_DIR}/boot"
 
-debootstrap --arch="${ARCH}" --components=main,contrib,non-free-firmware "${DEBIAN_SUITE}" "${MOUNT_DIR}" "https://deb.debian.org/debian"
+tar -xzf "${MINIROOTFS}" -C "${MOUNT_DIR}"
 
 ROOT_UUID="$(blkid -s UUID -o value "${ROOT_PART}")"
 BOOT_UUID="$(blkid -s UUID -o value "${BOOT_PART}")"
 
-cat > "${MOUNT_DIR}/etc/apt/sources.list" <<EOF
-deb https://deb.debian.org/debian ${DEBIAN_SUITE} main contrib non-free-firmware
-deb https://deb.debian.org/debian ${DEBIAN_SUITE}-updates main contrib non-free-firmware
-deb https://deb.debian.org/debian-security ${DEBIAN_SUITE}-security main contrib non-free-firmware
+cat > "${MOUNT_DIR}/etc/apk/repositories" <<EOF
+${ALPINE_MIRROR}/v${ALPINE_SERIES}/main
+${ALPINE_MIRROR}/v${ALPINE_SERIES}/community
 EOF
 
 cat > "${MOUNT_DIR}/etc/fstab" <<EOF
@@ -181,33 +194,32 @@ UUID=${ROOT_UUID}  /      ext4  defaults,noatime  0 1
 UUID=${BOOT_UUID}  /boot  ext4  defaults          0 2
 EOF
 
-echo "${HOSTNAME}" > "${MOUNT_DIR}/etc/hostname"
-
 cat > "${MOUNT_DIR}/etc/hosts" <<EOF
 127.0.0.1 localhost
-127.0.1.1 ${HOSTNAME}
 
 ::1 localhost ip6-localhost ip6-loopback
 ff02::1 ip6-allnodes
 ff02::2 ip6-allrouters
 EOF
 
-mkdir -p "${MOUNT_DIR}/etc/systemd/network" "${MOUNT_DIR}/root"
+mkdir -p \
+  "${MOUNT_DIR}/etc/default" \
+  "${MOUNT_DIR}/etc/network" \
+  "${MOUNT_DIR}/root"
 
-cat > "${MOUNT_DIR}/etc/systemd/network/20-wired.network" <<'EOF'
-[Match]
-Name=en* eth*
+cat > "${MOUNT_DIR}/etc/network/interfaces" <<'EOF'
+auto lo
+iface lo inet loopback
 
-[Network]
-DHCP=yes
+auto eth0
+iface eth0 inet dhcp
 EOF
 
 cat > "${MOUNT_DIR}/etc/default/grub" <<'EOF'
 GRUB_DEFAULT=0
 GRUB_TIMEOUT=1
-GRUB_DISTRIBUTOR=`dpkg-query -W -f='${binary:Package}\n' 'grub*' | head -n1 | cut -d- -f1`
-GRUB_CMDLINE_LINUX_DEFAULT="console=ttyS0,115200n8 net.ifnames=0 biosdevname=0"
-GRUB_CMDLINE_LINUX="console=tty0 console=ttyS0,115200n8 net.ifnames=0 biosdevname=0"
+GRUB_CMDLINE_LINUX_DEFAULT="console=ttyS0,115200n8 net.ifnames=0 biosdevname=0 rootfstype=ext4 rootwait modules=virtio_pci,virtio_blk,ext4"
+GRUB_CMDLINE_LINUX="console=tty0 console=ttyS0,115200n8 net.ifnames=0 biosdevname=0 rootfstype=ext4 rootwait modules=virtio_pci,virtio_blk,ext4"
 EOF
 
 install -m 0644 "${RESOLV_CONF_FILE}" "${MOUNT_DIR}/etc/resolv.conf"
@@ -227,54 +239,73 @@ env -i \
   HOME=/root \
   PATH=/usr/sbin:/usr/bin:/sbin:/bin \
   TERM="${TERM:-xterm}" \
-  DEBIAN_FRONTEND=noninteractive \
-  LANG=C.UTF-8 \
-  LC_ALL=C.UTF-8 \
   NBD_DEV="${NBD_DEV}" \
-  IMAGE_LOCALE="${IMAGE_LOCALE}" \
-  chroot "${MOUNT_DIR}" /bin/bash <<'CHROOT'
+  chroot "${MOUNT_DIR}" /bin/sh <<'CHROOT'
 set -euo pipefail
 
-apt-get update
-apt-get install -y \
-  ca-certificates \
-  cron \
-  gdisk \
-  grub-pc \
-  initramfs-tools \
-  linux-image-cloud-amd64 \
-  locales \
+apk update
+apk add \
+  alpine-base \
+  bash \
+  cronie \
+  cronie-openrc \
+  e2fsprogs \
+  e2fsprogs-extra \
+  dhcpcd \
+  grub \
+  grub-bios \
+  linux-virt \
+  mkinitfs \
   openssh-server \
   qemu-guest-agent \
+  qemu-guest-agent-openrc \
+  shadow \
   sudo
 
-printf '%s UTF-8\n' "${IMAGE_LOCALE}" > /etc/locale.gen
-locale-gen
-update-locale LANG="${IMAGE_LOCALE}" LC_ALL="${IMAGE_LOCALE}"
-export LANG="${IMAGE_LOCALE}" LC_ALL="${IMAGE_LOCALE}"
+sed -i '/^slaac private/s/^/#/' /etc/dhcpcd.conf
+sed -i '/^#slaac hwaddr/s/^#//' /etc/dhcpcd.conf
+grep -q '^adm:' /etc/group || addgroup -S adm
+grep -q '^sudo:' /etc/group || addgroup -S sudo
+addgroup root adm || true
+addgroup root sudo || true
+usermod -s /bin/bash root
 
-systemctl enable systemd-networkd
-systemctl enable cron
-systemctl enable ssh
-systemctl enable qemu-guest-agent
-systemctl enable serial-getty@ttyS0.service
+cat > /etc/mkinitfs/mkinitfs.conf <<'EOF'
+features="ata base ide scsi usb virtio ext4"
+EOF
+
+if grep -q '^#ttyS0::respawn:' /etc/inittab; then
+  sed -i 's/^#ttyS0::respawn:/ttyS0::respawn:/' /etc/inittab
+elif ! grep -q '^ttyS0::respawn:' /etc/inittab; then
+  printf '%s\n' 'ttyS0::respawn:/sbin/getty -L ttyS0 115200 vt100' >> /etc/inittab
+fi
+
+mkdir -p /etc/ssh
+sed -i 's/^#\?PermitRootLogin .*/PermitRootLogin prohibit-password/' /etc/ssh/sshd_config
+sed -i 's/^#\?PasswordAuthentication .*/PasswordAuthentication no/' /etc/ssh/sshd_config
+
+rc-update add networking boot
+rc-update add seedrng boot
+rc-update add crond default
+rc-update add sshd default
+rc-update add qemu-guest-agent default
 
 chown root:root /etc/resolv.conf
 chmod 0644 /etc/resolv.conf
-chattr +i /etc/resolv.conf
 
-cat > /tmp/root-crontab <<'EOF'
+if [[ -f /root/scripts/install-bundle.sh ]]; then
+  cat > /tmp/root-crontab <<'EOF'
 @reboot /bin/bash /root/scripts/install-bundle.sh # codex-install-bundle
 EOF
-crontab /tmp/root-crontab
-rm -f /tmp/root-crontab
+  crontab /tmp/root-crontab
+  rm -f /tmp/root-crontab
+fi
 
-echo "grub-pc grub-pc/install_devices ${NBD_DEV}" | debconf-set-selections
-echo "grub-pc grub-pc/install_devices_empty boolean false" | debconf-set-selections
+KERNEL_VERSION="$(basename "$(find /lib/modules -mindepth 1 -maxdepth 1 -type d | head -n1)")"
+mkinitfs "${KERNEL_VERSION}"
 
 grub-install --target=i386-pc "${NBD_DEV}"
-update-initramfs -u
-update-grub
+grub-mkconfig -o /boot/grub/grub.cfg
 CHROOT
 
 release_image

@@ -10,10 +10,10 @@ OUT_RAW="debian-${DEBIAN_VER}-btrfs-${ARCH}.raw"
 DOCKER_GPG_URL="https://download.docker.com/linux/debian/gpg"
 DOCKER_REPO='deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/debian trixie stable'
 
-ROOT_PUBKEY_FILE="$(realpath "${ROOT_PUBKEY_FILE:-root.pub}")"
-ROOT_CFG_FILE="$(realpath "${ROOT_CFG_FILE:-files/99-root-login.cfg}")"
+SSH_DIR="$(realpath "${SSH_DIR:-ssh}")"
+INTERFACES_FILE="$(realpath "${INTERFACES_FILE:-files/interfaces}")"
 RESOLV_CONF_FILE="$(realpath "${RESOLV_CONF_FILE:-files/resolv.conf}")"
-SCRIPTS_DIR="$(realpath "${SCRIPTS_DIR:-scripts}")"
+SCRIPTS_DIR="$(realpath "${SCRIPTS_DIR:-scripts/debian}")"
 WORKDIR="${WORKDIR:-$PWD/out}"
 HOSTNAME="${HOSTNAME:-build}"
 IMAGE_LOCALE="${IMAGE_LOCALE:-en_US.UTF-8}"
@@ -110,9 +110,13 @@ mount_bind() {
 
 trap cleanup EXIT
 require_root
-require_file "${ROOT_PUBKEY_FILE}"
-require_file "${ROOT_CFG_FILE}"
+require_file "${INTERFACES_FILE}"
 require_file "${RESOLV_CONF_FILE}"
+if [[ ! -d "${SSH_DIR}" ]]; then
+  echo "Missing required directory: ${SSH_DIR}" >&2
+  exit 1
+fi
+require_file "${SSH_DIR}/authorized_keys"
 if [[ ! -d "${SCRIPTS_DIR}" ]]; then
   echo "Missing required directory: ${SCRIPTS_DIR}" >&2
   exit 1
@@ -181,8 +185,6 @@ debootstrap --arch="${ARCH}" --components=main,contrib,non-free-firmware "${DEBI
 
 ROOT_UUID="$(blkid -s UUID -o value "${ROOT_PART}")"
 BOOT_UUID="$(blkid -s UUID -o value "${BOOT_PART}")"
-ROOT_PUBKEY="$(cat "${ROOT_PUBKEY_FILE}")"
-ROOT_CFG_CONTENT="$(cat "${ROOT_CFG_FILE}")"
 
 cat > "${MOUNT_DIR}/etc/apt/sources.list" <<EOF
 deb https://deb.debian.org/debian ${DEBIAN_SUITE} main contrib non-free-firmware
@@ -209,7 +211,7 @@ ff02::1 ip6-allnodes
 ff02::2 ip6-allrouters
 EOF
 
-mkdir -p "${MOUNT_DIR}/etc/systemd/network" "${MOUNT_DIR}/etc/cloud/cloud.cfg.d" "${MOUNT_DIR}/root/.ssh"
+mkdir -p "${MOUNT_DIR}/etc/systemd/network" "${MOUNT_DIR}/root"
 
 cat > "${MOUNT_DIR}/etc/systemd/network/20-wired.network" <<'EOF'
 [Match]
@@ -219,6 +221,9 @@ Name=en* eth*
 DHCP=yes
 EOF
 
+mkdir -p "${MOUNT_DIR}/etc/network"
+install -m 0644 "${INTERFACES_FILE}" "${MOUNT_DIR}/etc/network/interfaces"
+
 cat > "${MOUNT_DIR}/etc/default/grub" <<'EOF'
 GRUB_DEFAULT=0
 GRUB_TIMEOUT=1
@@ -227,16 +232,9 @@ GRUB_CMDLINE_LINUX_DEFAULT="console=ttyS0,115200n8 net.ifnames=0 biosdevname=0"
 GRUB_CMDLINE_LINUX="console=tty0 console=ttyS0,115200n8 net.ifnames=0 biosdevname=0"
 EOF
 
-cat > "${MOUNT_DIR}/etc/cloud/cloud.cfg.d/99-root-login.cfg" <<EOF
-${ROOT_CFG_CONTENT}
-EOF
-
-chmod 0700 "${MOUNT_DIR}/root/.ssh"
-cat > "${MOUNT_DIR}/root/.ssh/authorized_keys" <<EOF
-${ROOT_PUBKEY}
-EOF
-chmod 0600 "${MOUNT_DIR}/root/.ssh/authorized_keys"
 install -m 0644 "${RESOLV_CONF_FILE}" "${MOUNT_DIR}/etc/resolv.conf"
+cp -a "${SSH_DIR}" "${MOUNT_DIR}/root/ssh"
+chown -R root:root "${MOUNT_DIR}/root/ssh"
 mkdir -p "${MOUNT_DIR}/root/scripts"
 cp -a "${SCRIPTS_DIR}/." "${MOUNT_DIR}/root/scripts/"
 chown -R root:root "${MOUNT_DIR}/root/scripts"
@@ -264,9 +262,8 @@ set -euo pipefail
 apt-get update
 apt-get install -y \
   btrfs-progs \
+  btrbk \
   ca-certificates \
-  cloud-init \
-  cloud-guest-utils \
   cron \
   gdisk \
   grub-pc \
@@ -274,8 +271,11 @@ apt-get install -y \
   linux-image-cloud-amd64 \
   locales \
   openssh-server \
+  isc-dhcp-client \
   qemu-guest-agent \
   sudo
+
+echo 'root:qwerasdf' | chpasswd
 
 printf '%s UTF-8\n' "${IMAGE_LOCALE}" > /etc/locale.gen
 locale-gen
@@ -287,6 +287,26 @@ systemctl enable cron
 systemctl enable ssh
 systemctl enable qemu-guest-agent
 systemctl enable serial-getty@ttyS0.service
+
+install -d -m 0755 /.snapshots/btrbk /etc/btrbk
+cat > /etc/btrbk/btrbk.conf <<'EOF'
+timestamp_format        long
+snapshot_preserve_min   no
+snapshot_preserve       24h 7d 0w 0m 0y
+snapshot_dir            /.snapshots/btrbk
+
+subvolume /
+  snapshot_name root
+
+subvolume /home
+  snapshot_name home
+EOF
+
+cat > /etc/cron.hourly/btrbk <<'EOF'
+#!/bin/sh
+exec /usr/bin/btrbk -q -c /etc/btrbk/btrbk.conf run
+EOF
+chmod 0755 /etc/cron.hourly/btrbk
 
 chown root:root /etc/resolv.conf
 chmod 0644 /etc/resolv.conf
