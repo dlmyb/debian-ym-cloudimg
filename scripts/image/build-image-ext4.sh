@@ -6,18 +6,36 @@ DEBIAN_SUITE=trixie
 ARCH=amd64
 DISK_SIZE="${DISK_SIZE:-5G}"
 OUT_QCOW2="debian-${DEBIAN_VER}-ext4-${ARCH}.qcow2"
-OUT_RAW="debian-${DEBIAN_VER}-ext4-${ARCH}.raw"
-DOCKER_GPG_URL="https://download.docker.com/linux/debian/gpg"
-DOCKER_REPO='deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/debian trixie stable'
 
-SSH_DIR="$(realpath "${SSH_DIR:-ssh}")"
-RESOLV_CONF_FILE="$(realpath "${RESOLV_CONF_FILE:-files/resolv.conf}")"
-SCRIPTS_DIR="$(realpath "${SCRIPTS_DIR:-scripts/debian}")"
+SSH_DIR="$(realpath "${SSH_DIR:-stage/ssh}")"
+RESOLV_CONF_FILE="$(realpath "${RESOLV_CONF_FILE:-stage/files/resolv.conf}")"
+SCRIPTS_DIR="$(realpath "${SCRIPTS_DIR:-stage/scripts/debian}")"
+STAGE_IMAGE_CONFIG_SCRIPT="$(realpath "${STAGE_IMAGE_CONFIG_SCRIPT:-scripts/stage-image-config.sh}")"
 WORKDIR="${WORKDIR:-$PWD/out}"
 HOSTNAME="${HOSTNAME:-build}"
 IMAGE_LOCALE="${IMAGE_LOCALE:-en_US.UTF-8}"
 MOUNT_DIR=""
 NBD_DEV=""
+
+INTERFACES_FILE="${INTERFACES_FILE:-stage/files/interfaces}"
+if [[ -f "${INTERFACES_FILE}" ]]; then
+  INTERFACES_FILE="$(realpath "${INTERFACES_FILE}")"
+elif [[ "${INTERFACES_FILE}" == "stage/files/interfaces" ]]; then
+  INTERFACES_FILE=""
+else
+  echo "Missing optional interfaces file: ${INTERFACES_FILE}" >&2
+  exit 1
+fi
+
+SOURCES_LIST_FILE="${SOURCES_LIST_FILE:-stage/files/sources.list}"
+if [[ -f "${SOURCES_LIST_FILE}" ]]; then
+  SOURCES_LIST_FILE="$(realpath "${SOURCES_LIST_FILE}")"
+elif [[ "${SOURCES_LIST_FILE}" == "stage/files/sources.list" ]]; then
+  SOURCES_LIST_FILE=""
+else
+  echo "Missing optional sources.list file: ${SOURCES_LIST_FILE}" >&2
+  exit 1
+fi
 
 require_root() {
   if [[ ${EUID} -ne 0 ]]; then
@@ -110,6 +128,7 @@ mount_bind() {
 trap cleanup EXIT
 require_root
 require_file "${RESOLV_CONF_FILE}"
+require_file "${STAGE_IMAGE_CONFIG_SCRIPT}"
 if [[ ! -d "${SSH_DIR}" ]]; then
   echo "Missing required directory: ${SSH_DIR}" >&2
   exit 1
@@ -130,18 +149,16 @@ for cmd in \
   partprobe \
   qemu-img \
   qemu-nbd \
-  sha256sum \
   udevadm \
   umount \
-  virt-sysprep \
-  xz; do
+  virt-sysprep; do
   require_cmd "${cmd}"
 done
 
 mkdir -p "${WORKDIR}"
 cd "${WORKDIR}"
 
-rm -f "${OUT_QCOW2}" "${OUT_RAW}" "${OUT_RAW}.xz" "${OUT_RAW}.xz.sha256"
+rm -f "${OUT_QCOW2}"
 qemu-img create -f qcow2 "${OUT_QCOW2}" "${DISK_SIZE}"
 attach_nbd "${OUT_QCOW2}"
 
@@ -170,11 +187,13 @@ debootstrap --arch="${ARCH}" --components=main,contrib,non-free-firmware "${DEBI
 ROOT_UUID="$(blkid -s UUID -o value "${ROOT_PART}")"
 BOOT_UUID="$(blkid -s UUID -o value "${BOOT_PART}")"
 
+if [[ -z "${SOURCES_LIST_FILE}" ]]; then
 cat > "${MOUNT_DIR}/etc/apt/sources.list" <<EOF
 deb https://deb.debian.org/debian ${DEBIAN_SUITE} main contrib non-free-firmware
 deb https://deb.debian.org/debian ${DEBIAN_SUITE}-updates main contrib non-free-firmware
 deb https://deb.debian.org/debian-security ${DEBIAN_SUITE}-security main contrib non-free-firmware
 EOF
+fi
 
 cat > "${MOUNT_DIR}/etc/fstab" <<EOF
 UUID=${ROOT_UUID}  /      ext4  defaults,noatime  0 1
@@ -192,16 +211,6 @@ ff02::1 ip6-allnodes
 ff02::2 ip6-allrouters
 EOF
 
-mkdir -p "${MOUNT_DIR}/etc/systemd/network" "${MOUNT_DIR}/root"
-
-cat > "${MOUNT_DIR}/etc/systemd/network/20-wired.network" <<'EOF'
-[Match]
-Name=en* eth*
-
-[Network]
-DHCP=yes
-EOF
-
 cat > "${MOUNT_DIR}/etc/default/grub" <<'EOF'
 GRUB_DEFAULT=0
 GRUB_TIMEOUT=1
@@ -210,12 +219,13 @@ GRUB_CMDLINE_LINUX_DEFAULT="console=ttyS0,115200n8 net.ifnames=0 biosdevname=0"
 GRUB_CMDLINE_LINUX="console=tty0 console=ttyS0,115200n8 net.ifnames=0 biosdevname=0"
 EOF
 
-install -m 0644 "${RESOLV_CONF_FILE}" "${MOUNT_DIR}/etc/resolv.conf"
-cp -a "${SSH_DIR}" "${MOUNT_DIR}/root/ssh"
-chown -R root:root "${MOUNT_DIR}/root/ssh"
-mkdir -p "${MOUNT_DIR}/root/scripts"
-cp -a "${SCRIPTS_DIR}/." "${MOUNT_DIR}/root/scripts/"
-chown -R root:root "${MOUNT_DIR}/root/scripts"
+bash "${STAGE_IMAGE_CONFIG_SCRIPT}" \
+  "${MOUNT_DIR}" \
+  "${RESOLV_CONF_FILE}" \
+  "${SSH_DIR}" \
+  "${SCRIPTS_DIR}" \
+  "${INTERFACES_FILE}" \
+  "${SOURCES_LIST_FILE}"
 
 mount_bind /dev "${MOUNT_DIR}/dev"
 mount_bind /dev/pts "${MOUNT_DIR}/dev/pts"
@@ -235,13 +245,41 @@ env -i \
   chroot "${MOUNT_DIR}" /bin/bash <<'CHROOT'
 set -euo pipefail
 
+unit_path() {
+  local unit=$1
+  local path
+
+  for path in "/usr/lib/systemd/system/${unit}" "/lib/systemd/system/${unit}"; do
+    if [[ -e "${path}" ]]; then
+      printf '%s\n' "${path}"
+      return 0
+    fi
+  done
+
+  echo "Missing systemd unit: ${unit}" >&2
+  exit 1
+}
+
+enable_unit() {
+  local unit=$1
+  local target=$2
+  local path
+
+  path="$(unit_path "${unit}")"
+  mkdir -p "/etc/systemd/system/${target}.wants"
+  ln -sf "${path}" "/etc/systemd/system/${target}.wants/${unit}"
+}
+
 apt-get update
 apt-get install -y \
   ca-certificates \
+  cloud-init \
   cron \
   gdisk \
   grub-pc \
+  ifupdown \
   initramfs-tools \
+  isc-dhcp-client \
   linux-image-cloud-amd64 \
   locales \
   openssh-server \
@@ -250,14 +288,16 @@ apt-get install -y \
 
 printf '%s UTF-8\n' "${IMAGE_LOCALE}" > /etc/locale.gen
 locale-gen
-update-locale LANG="${IMAGE_LOCALE}" LC_ALL="${IMAGE_LOCALE}"
-export LANG="${IMAGE_LOCALE}" LC_ALL="${IMAGE_LOCALE}"
+update-locale LANG="${IMAGE_LOCALE}"
+unset LC_ALL
+export LANG="${IMAGE_LOCALE}"
 
-systemctl enable systemd-networkd
-systemctl enable cron
-systemctl enable ssh
-systemctl enable qemu-guest-agent
-systemctl enable serial-getty@ttyS0.service
+enable_unit networking.service multi-user.target
+enable_unit cron.service multi-user.target
+enable_unit ssh.service multi-user.target
+enable_unit qemu-guest-agent.service multi-user.target
+mkdir -p /etc/systemd/system/getty.target.wants
+ln -sf "$(unit_path serial-getty@.service)" /etc/systemd/system/getty.target.wants/serial-getty@ttyS0.service
 
 chown root:root /etc/resolv.conf
 chmod 0644 /etc/resolv.conf
@@ -282,9 +322,5 @@ release_image
 virt-sysprep -a "${OUT_QCOW2}" \
   --operations machine-id,ssh-hostkeys,tmp-files,logfiles,package-manager-cache
 
-qemu-img convert -f qcow2 -O raw "${OUT_QCOW2}" "${OUT_RAW}"
-xz -T0 -9 -z "${OUT_RAW}"
-sha256sum "${OUT_RAW}.xz" > "${OUT_RAW}.xz.sha256"
-
-echo "Built artifacts:"
-ls -lh "${OUT_RAW}.xz" "${OUT_RAW}.xz.sha256"
+echo "Built artifact:"
+ls -lh "${OUT_QCOW2}"

@@ -1,8 +1,0 @@
-auto lo
-iface lo inet loopback
-
-auto eth0
-iface eth0 inet static
-    address 43.247.132.228/24
-    gateway 43.247.132.1
-    dns-nameservers 8.8.8.8 8.8.4.4
