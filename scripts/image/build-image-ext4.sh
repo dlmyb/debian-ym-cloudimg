@@ -161,6 +161,7 @@ cd "${WORKDIR}"
 rm -f "${OUT_QCOW2}"
 qemu-img create -f qcow2 "${OUT_QCOW2}" "${DISK_SIZE}"
 attach_nbd "${OUT_QCOW2}"
+udevadm settle
 
 parted -s "${NBD_DEV}" -- \
   mklabel msdos \

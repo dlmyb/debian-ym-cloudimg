@@ -21,6 +21,7 @@ This repo builds customized Debian 13 amd64 cloud images from a fresh bootstrap 
   - `stage/scripts/debian/` becomes `/root/scripts/`
 - `scripts/image/build-image-ext4.sh` builds the ext4 qcow2 image
 - `scripts/image/build-image-btrfs.sh` builds the btrfs qcow2 image
+- `scripts/image/build-image-luks-ext4.sh` builds an ext4 qcow2 image with a LUKS-encrypted root filesystem and `dropbear-initramfs` remote unlock
 - `scripts/image/copy-config-to-qcow2.sh` restages `stage/` content into an existing qcow2 image
 - `scripts/image/export-qcow2-to-raw-xz.sh` converts an existing qcow2 image to `raw.xz`
 - `scripts/image/stage-qcow2-image.sh` combines restaging and export in one command
@@ -91,6 +92,7 @@ Use the Makefile as the uniform entry point:
 ```bash
 make ext4
 make btrfs
+make luks-ext4 LUKS_PASSPHRASE=changeme
 make copy TARGET_IMG=out/debian-13-ext4-amd64.qcow2
 make xz TARGET_IMG=out/debian-13-ext4-amd64.qcow2
 ```
@@ -98,6 +100,23 @@ make xz TARGET_IMG=out/debian-13-ext4-amd64.qcow2
 `make copy` updates an existing qcow2 in place with the staged config files.
 `make xz` converts an existing qcow2 into `raw.xz` in `out/` by default.
 You can also use `target_img=...` instead of `TARGET_IMG=...`, and `OUTPUT_IMG=...` or `output_img=...` to override the `make xz` output path.
+
+## LUKS ext4 build
+
+The `scripts/image/build-image-luks-ext4.sh` script creates a qcow2 image with:
+
+- `/boot` on plain `ext4`
+- `/` on `ext4` inside a LUKS container
+- `dropbear-initramfs` for remote SSH unlock before the root filesystem is opened
+
+Run it with:
+
+```bash
+make luks-ext4 LUKS_PASSPHRASE=changeme
+```
+
+The builder uses `stage/ssh/authorized_keys` for both the final root account and `/etc/dropbear/initramfs/authorized_keys` inside the initramfs.
+At boot, connect to the initramfs SSH server and run `cryptroot-unlock` to unlock the root filesystem.
 
 ## Stage workflow
 

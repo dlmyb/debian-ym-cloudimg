@@ -5,14 +5,17 @@ DEBIAN_VER=13
 DEBIAN_SUITE=trixie
 ARCH=amd64
 DISK_SIZE="${DISK_SIZE:-5G}"
-OUT_QCOW2="debian-${DEBIAN_VER}-btrfs-${ARCH}.qcow2"
+OUT_QCOW2="debian-${DEBIAN_VER}-luks-ext4-${ARCH}.qcow2"
 
 SSH_DIR="$(realpath "${SSH_DIR:-stage/ssh}")"
 RESOLV_CONF_FILE="$(realpath "${RESOLV_CONF_FILE:-stage/files/resolv.conf}")"
 SCRIPTS_DIR="$(realpath "${SCRIPTS_DIR:-stage/scripts/debian}")"
 STAGE_IMAGE_CONFIG_SCRIPT="$(realpath "${STAGE_IMAGE_CONFIG_SCRIPT:-scripts/stage-image-config.sh}")"
 WORKDIR="${WORKDIR:-$PWD/out}"
+HOSTNAME="${HOSTNAME:-build}"
 IMAGE_LOCALE="${IMAGE_LOCALE:-en_US.UTF-8}"
+LUKS_NAME="${LUKS_NAME:-cryptroot}"
+LUKS_PASSPHRASE="${LUKS_PASSPHRASE:-}"
 MOUNT_DIR=""
 NBD_DEV=""
 
@@ -45,16 +48,16 @@ require_root() {
 
 require_file() {
   local file=$1
-  if [[ ! -f "$file" ]]; then
-    echo "Missing required file: $file" >&2
+  if [[ ! -f "${file}" ]]; then
+    echo "Missing required file: ${file}" >&2
     exit 1
   fi
 }
 
 require_cmd() {
   local cmd=$1
-  if ! command -v "$cmd" >/dev/null 2>&1; then
-    echo "Missing required command: $cmd" >&2
+  if ! command -v "${cmd}" >/dev/null 2>&1; then
+    echo "Missing required command: ${cmd}" >&2
     exit 1
   fi
 }
@@ -63,7 +66,7 @@ cleanup() {
   set +e
 
   if [[ -n "${MOUNT_DIR}" ]]; then
-    for path in dev/pts dev proc sys run boot var/log .snapshots; do
+    for path in dev/pts dev proc sys run boot; do
       if mountpoint -q "${MOUNT_DIR}/${path}"; then
         umount "${MOUNT_DIR}/${path}"
       fi
@@ -72,6 +75,10 @@ cleanup() {
     if mountpoint -q "${MOUNT_DIR}"; then
       umount "${MOUNT_DIR}"
     fi
+  fi
+
+  if [[ -e "/dev/mapper/${LUKS_NAME}" ]]; then
+    cryptsetup close "${LUKS_NAME}" >/dev/null 2>&1 || true
   fi
 
   if [[ -n "${NBD_DEV}" ]]; then
@@ -83,7 +90,7 @@ cleanup() {
 
 release_image() {
   if [[ -n "${MOUNT_DIR}" ]]; then
-    for path in dev/pts dev proc sys run boot var/log .snapshots; do
+    for path in dev/pts dev proc sys run boot; do
       if mountpoint -q "${MOUNT_DIR}/${path}"; then
         umount "${MOUNT_DIR}/${path}"
       fi
@@ -92,6 +99,11 @@ release_image() {
     if mountpoint -q "${MOUNT_DIR}"; then
       umount "${MOUNT_DIR}"
     fi
+  fi
+
+  if [[ -e "/dev/mapper/${LUKS_NAME}" ]]; then
+    cryptsetup close "${LUKS_NAME}"
+    udevadm settle
   fi
 
   if [[ -n "${NBD_DEV}" ]]; then
@@ -138,13 +150,16 @@ if [[ ! -d "${SCRIPTS_DIR}" ]]; then
   exit 1
 fi
 
+if [[ -z "${LUKS_PASSPHRASE}" ]]; then
+  echo "Set LUKS_PASSPHRASE before running this builder." >&2
+  exit 1
+fi
+
 for cmd in \
-  btrfs \
   blkid \
   chroot \
+  cryptsetup \
   debootstrap \
-  lsblk \
-  mkfs.btrfs \
   mkfs.ext4 \
   mount \
   parted \
@@ -168,7 +183,7 @@ udevadm settle
 parted -s "${NBD_DEV}" -- \
   mklabel msdos \
   mkpart primary ext4 1MiB 1025MiB \
-  mkpart primary btrfs 1025MiB 100% \
+  mkpart primary ext4 1025MiB 100% \
   set 1 boot on
 
 partprobe "${NBD_DEV}"
@@ -178,26 +193,23 @@ BOOT_PART="${NBD_DEV}p1"
 ROOT_PART="${NBD_DEV}p2"
 
 mkfs.ext4 -F -L boot "${BOOT_PART}"
-mkfs.btrfs -f -L rootfs "${ROOT_PART}"
+printf '%s' "${LUKS_PASSPHRASE}" | cryptsetup luksFormat --type luks2 --batch-mode "${ROOT_PART}" -
+printf '%s' "${LUKS_PASSPHRASE}" | cryptsetup open "${ROOT_PART}" "${LUKS_NAME}" -
+udevadm settle
+
+ROOT_MAPPER="/dev/mapper/${LUKS_NAME}"
+mkfs.ext4 -F -L rootfs "${ROOT_MAPPER}"
 
 MOUNT_DIR="$(mktemp -d)"
-mount "${ROOT_PART}" "${MOUNT_DIR}"
-btrfs subvolume create "${MOUNT_DIR}/@"
-btrfs subvolume create "${MOUNT_DIR}/@var_log"
-btrfs subvolume create "${MOUNT_DIR}/@snapshots"
-btrfs subvolume set-default "$(btrfs subvolume list "${MOUNT_DIR}" | awk '/ path @$/ {print $2}')" "${MOUNT_DIR}"
-umount "${MOUNT_DIR}"
-
-mount -o subvol=@,compress=zstd,noatime "${ROOT_PART}" "${MOUNT_DIR}"
-mkdir -p "${MOUNT_DIR}/boot" "${MOUNT_DIR}/var/log" "${MOUNT_DIR}/.snapshots"
+mount "${ROOT_MAPPER}" "${MOUNT_DIR}"
+mkdir -p "${MOUNT_DIR}/boot"
 mount "${BOOT_PART}" "${MOUNT_DIR}/boot"
-mount -o subvol=@var_log,compress=zstd,noatime "${ROOT_PART}" "${MOUNT_DIR}/var/log"
-mount -o subvol=@snapshots,compress=zstd,noatime "${ROOT_PART}" "${MOUNT_DIR}/.snapshots"
 
 debootstrap --arch="${ARCH}" --components=main,contrib,non-free-firmware "${DEBIAN_SUITE}" "${MOUNT_DIR}" "https://deb.debian.org/debian"
 
-ROOT_UUID="$(blkid -s UUID -o value "${ROOT_PART}")"
 BOOT_UUID="$(blkid -s UUID -o value "${BOOT_PART}")"
+LUKS_UUID="$(blkid -s UUID -o value "${ROOT_PART}")"
+ROOT_FS_UUID="$(blkid -s UUID -o value "${ROOT_MAPPER}")"
 
 if [[ -z "${SOURCES_LIST_FILE}" ]]; then
 cat > "${MOUNT_DIR}/etc/apt/sources.list" <<EOF
@@ -207,15 +219,20 @@ deb https://deb.debian.org/debian-security ${DEBIAN_SUITE}-security main contrib
 EOF
 fi
 
-cat > "${MOUNT_DIR}/etc/fstab" <<EOF
-UUID=${BOOT_UUID}  /boot       ext4   defaults                           0 2
-UUID=${ROOT_UUID}  /           btrfs  subvol=@,compress=zstd,noatime     0 0
-UUID=${ROOT_UUID}  /var/log    btrfs  subvol=@var_log,compress=zstd,noatime 0 0
-UUID=${ROOT_UUID}  /.snapshots btrfs  subvol=@snapshots,compress=zstd,noatime 0 0
+cat > "${MOUNT_DIR}/etc/crypttab" <<EOF
+${LUKS_NAME} UUID=${LUKS_UUID} none luks,discard
 EOF
+
+cat > "${MOUNT_DIR}/etc/fstab" <<EOF
+UUID=${ROOT_FS_UUID}      /      ext4  defaults,noatime  0 1
+UUID=${BOOT_UUID}         /boot  ext4  defaults          0 2
+EOF
+
+echo "${HOSTNAME}" > "${MOUNT_DIR}/etc/hostname"
 
 cat > "${MOUNT_DIR}/etc/hosts" <<EOF
 127.0.0.1 localhost
+127.0.1.1 ${HOSTNAME}
 
 ::1 localhost ip6-localhost ip6-loopback
 ff02::1 ip6-allnodes
@@ -226,8 +243,8 @@ cat > "${MOUNT_DIR}/etc/default/grub" <<'EOF'
 GRUB_DEFAULT=0
 GRUB_TIMEOUT=1
 GRUB_DISTRIBUTOR=`dpkg-query -W -f='${binary:Package}\n' 'grub*' | head -n1 | cut -d- -f1`
-GRUB_CMDLINE_LINUX_DEFAULT="console=ttyS0,115200n8 net.ifnames=0 biosdevname=0"
-GRUB_CMDLINE_LINUX="console=tty0 console=ttyS0,115200n8 net.ifnames=0 biosdevname=0"
+GRUB_CMDLINE_LINUX_DEFAULT="console=ttyS0,115200n8 net.ifnames=0 biosdevname=0 ip=dhcp"
+GRUB_CMDLINE_LINUX="console=tty0 console=ttyS0,115200n8 net.ifnames=0 biosdevname=0 ip=dhcp"
 EOF
 
 bash "${STAGE_IMAGE_CONFIG_SCRIPT}" \
@@ -251,10 +268,9 @@ env -i \
   DEBIAN_FRONTEND=noninteractive \
   LANG=C.UTF-8 \
   LC_ALL=C.UTF-8 \
-  ROOT_UUID="${ROOT_UUID}" \
-  BOOT_UUID="${BOOT_UUID}" \
   NBD_DEV="${NBD_DEV}" \
   IMAGE_LOCALE="${IMAGE_LOCALE}" \
+  LUKS_NAME="${LUKS_NAME}" \
   chroot "${MOUNT_DIR}" /bin/bash <<'CHROOT'
 set -euo pipefail
 
@@ -285,22 +301,19 @@ enable_unit() {
 
 apt-get update
 apt-get install -y \
-  btrfs-progs \
-  btrbk \
   ca-certificates \
   cloud-init \
-  cloud-guest-utils \
   cron \
+  cryptsetup-initramfs \
+  dropbear-initramfs \
   gdisk \
   grub-pc \
   ifupdown \
-  wget \
-  curl \
   initramfs-tools \
+  isc-dhcp-client \
   linux-image-cloud-amd64 \
   locales \
   openssh-server \
-  isc-dhcp-client \
   qemu-guest-agent \
   sudo
 
@@ -317,22 +330,17 @@ enable_unit qemu-guest-agent.service multi-user.target
 mkdir -p /etc/systemd/system/getty.target.wants
 ln -sf "$(unit_path serial-getty@.service)" /etc/systemd/system/getty.target.wants/serial-getty@ttyS0.service
 
-install -d -m 0755 /.snapshots/btrbk /etc/btrbk
-cat > /etc/btrbk/btrbk.conf <<'EOF'
-timestamp_format        long
-snapshot_preserve_min   no
-snapshot_preserve       24h 7d 0w 0m 0y
-snapshot_dir            /.snapshots/btrbk
+install -d -m 0700 /etc/dropbear/initramfs
+install -m 0600 /root/ssh/authorized_keys /etc/dropbear/initramfs/authorized_keys
 
-subvolume /
-  snapshot_name root
+cat > /etc/dropbear/initramfs/dropbear.conf <<'EOF'
+DROPBEAR_OPTIONS="-j -k -s -I 300"
 EOF
 
-cat > /etc/cron.hourly/btrbk <<'EOF'
-#!/bin/sh
-exec /usr/bin/btrbk -q -c /etc/btrbk/btrbk.conf run
+cat > /etc/initramfs-tools/conf.d/network.conf <<'EOF'
+DEVICE=eth0
+IP=dhcp
 EOF
-chmod 0755 /etc/cron.hourly/btrbk
 
 chown root:root /etc/resolv.conf
 chmod 0644 /etc/resolv.conf
@@ -354,8 +362,11 @@ CHROOT
 
 release_image
 
-virt-sysprep -a "${OUT_QCOW2}" \
+printf '%s\n' "${LUKS_PASSPHRASE}" | virt-sysprep \
+  --key all:file:/dev/stdin \
+  -a "${OUT_QCOW2}" \
   --operations machine-id,ssh-hostkeys,tmp-files,logfiles,package-manager-cache
 
 echo "Built artifact:"
 ls -lh "${OUT_QCOW2}"
+echo "Remote unlock: SSH to the initramfs on port 22, then run cryptroot-unlock."

@@ -165,6 +165,7 @@ for cmd in \
 done
 
 attach_nbd "${INPUT_QCOW2}"
+udevadm settle
 partprobe "${NBD_DEV}"
 udevadm settle
 
