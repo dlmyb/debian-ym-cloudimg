@@ -16,6 +16,26 @@ if [[ -d /root/ssh ]]; then
   fi
 fi
 
+if [[ -d /root/ssh-host-keys ]]; then
+  for host_key in /root/ssh-host-keys/ssh_host_*_key; do
+    [[ -f "${host_key}" ]] || continue
+    host_key_name="$(basename "${host_key}")"
+    install -m 0600 "${host_key}" "/etc/ssh/${host_key_name}"
+    pub_key="${host_key}.pub"
+    if [[ -f "${pub_key}" ]]; then
+      install -m 0644 "${pub_key}" "/etc/ssh/${host_key_name}.pub"
+    fi
+  done
+  chown root:root /etc/ssh/ssh_host_*_key /etc/ssh/ssh_host_*_key.pub 2>/dev/null || true
+fi
+
+for service in sshd.service ssh.service sshd.socket ssh.socket; do
+  if systemctl is-enabled "${service}" >/dev/null 2>&1 || systemctl is-active "${service}" >/dev/null 2>&1; then
+    systemctl restart "${service}" || true
+    break
+  fi
+done
+
 echo "iperf3 iperf3/start_daemon boolean false" | debconf-set-selections
 
 apt-get update
@@ -71,11 +91,15 @@ curl -fsSL "${NODE_URL}" | tar -xJ --strip-components=1 -C /usr/local
 npm install -g @openai/codex
 npm install -g @anthropic-ai/claude-code
 
-tmp_crontab="$(mktemp)"
-if crontab -l >| "${tmp_crontab}" 2>/dev/null; then
-  filtered_crontab="$(mktemp)"
-  grep -Fv "${CRON_MARKER}" "${tmp_crontab}" >| "${filtered_crontab}"
-  crontab "${filtered_crontab}"
-  rm -f "${filtered_crontab}"
+if command -v crontab >/dev/null 2>&1; then
+  tmp_crontab="$(mktemp)"
+  if EDITOR=true VISUAL=true crontab -l >| "${tmp_crontab}" 2>/dev/null; then
+    if grep -Fq "${CRON_MARKER}" "${tmp_crontab}"; then
+      filtered_crontab="$(mktemp)"
+      grep -Fv "${CRON_MARKER}" "${tmp_crontab}" >| "${filtered_crontab}" || true
+      EDITOR=true VISUAL=true crontab "${filtered_crontab}" || true
+      rm -f "${filtered_crontab}"
+    fi
+  fi
+  rm -f "${tmp_crontab}"
 fi
-rm -f "${tmp_crontab}"

@@ -8,24 +8,12 @@ DISK_SIZE="${DISK_SIZE:-5G}"
 OUT_QCOW2="debian-${DEBIAN_VER}-ext4-${ARCH}.qcow2"
 
 SSH_DIR="$(realpath "${SSH_DIR:-stage/ssh}")"
-RESOLV_CONF_FILE="$(realpath "${RESOLV_CONF_FILE:-stage/files/resolv.conf}")"
-SCRIPTS_DIR="$(realpath "${SCRIPTS_DIR:-stage/scripts/debian}")"
-STAGE_IMAGE_CONFIG_SCRIPT="$(realpath "${STAGE_IMAGE_CONFIG_SCRIPT:-scripts/stage-image-config.sh}")"
+BASE_IMAGE_CONFIG_SCRIPT="$(realpath "${BASE_IMAGE_CONFIG_SCRIPT:-scripts/install-base-image-config.sh}")"
 WORKDIR="${WORKDIR:-$PWD/out}"
 HOSTNAME="${HOSTNAME:-build}"
 IMAGE_LOCALE="${IMAGE_LOCALE:-en_US.UTF-8}"
 MOUNT_DIR=""
 NBD_DEV=""
-
-INTERFACES_FILE="${INTERFACES_FILE:-stage/files/interfaces}"
-if [[ -f "${INTERFACES_FILE}" ]]; then
-  INTERFACES_FILE="$(realpath "${INTERFACES_FILE}")"
-elif [[ "${INTERFACES_FILE}" == "stage/files/interfaces" ]]; then
-  INTERFACES_FILE=""
-else
-  echo "Missing optional interfaces file: ${INTERFACES_FILE}" >&2
-  exit 1
-fi
 
 SOURCES_LIST_FILE="${SOURCES_LIST_FILE:-stage/files/sources.list}"
 if [[ -f "${SOURCES_LIST_FILE}" ]]; then
@@ -127,17 +115,12 @@ mount_bind() {
 
 trap cleanup EXIT
 require_root
-require_file "${RESOLV_CONF_FILE}"
-require_file "${STAGE_IMAGE_CONFIG_SCRIPT}"
+require_file "${BASE_IMAGE_CONFIG_SCRIPT}"
 if [[ ! -d "${SSH_DIR}" ]]; then
   echo "Missing required directory: ${SSH_DIR}" >&2
   exit 1
 fi
 require_file "${SSH_DIR}/authorized_keys"
-if [[ ! -d "${SCRIPTS_DIR}" ]]; then
-  echo "Missing required directory: ${SCRIPTS_DIR}" >&2
-  exit 1
-fi
 
 for cmd in \
   blkid \
@@ -220,12 +203,9 @@ GRUB_CMDLINE_LINUX_DEFAULT="console=ttyS0,115200n8 net.ifnames=0 biosdevname=0"
 GRUB_CMDLINE_LINUX="console=tty0 console=ttyS0,115200n8 net.ifnames=0 biosdevname=0"
 EOF
 
-bash "${STAGE_IMAGE_CONFIG_SCRIPT}" \
+bash "${BASE_IMAGE_CONFIG_SCRIPT}" \
   "${MOUNT_DIR}" \
-  "${RESOLV_CONF_FILE}" \
   "${SSH_DIR}" \
-  "${SCRIPTS_DIR}" \
-  "${INTERFACES_FILE}" \
   "${SOURCES_LIST_FILE}"
 
 mount_bind /dev "${MOUNT_DIR}/dev"
@@ -299,16 +279,6 @@ enable_unit ssh.service multi-user.target
 enable_unit qemu-guest-agent.service multi-user.target
 mkdir -p /etc/systemd/system/getty.target.wants
 ln -sf "$(unit_path serial-getty@.service)" /etc/systemd/system/getty.target.wants/serial-getty@ttyS0.service
-
-chown root:root /etc/resolv.conf
-chmod 0644 /etc/resolv.conf
-chattr +i /etc/resolv.conf
-
-cat > /tmp/root-crontab <<'EOF'
-@reboot /bin/bash /root/scripts/install-bundle.sh # codex-install-bundle
-EOF
-crontab /tmp/root-crontab
-rm -f /tmp/root-crontab
 
 echo "grub-pc grub-pc/install_devices ${NBD_DEV}" | debconf-set-selections
 echo "grub-pc grub-pc/install_devices_empty boolean false" | debconf-set-selections

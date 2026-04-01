@@ -5,6 +5,8 @@ SSH_DIR="$(realpath "${SSH_DIR:-stage/ssh}")"
 RESOLV_CONF_FILE="$(realpath "${RESOLV_CONF_FILE:-stage/files/resolv.conf}")"
 SCRIPTS_DIR="$(realpath "${SCRIPTS_DIR:-stage/scripts/debian}")"
 STAGE_IMAGE_CONFIG_SCRIPT="$(realpath "${STAGE_IMAGE_CONFIG_SCRIPT:-scripts/stage-image-config.sh}")"
+LUKS_PASSPHRASE="${LUKS_PASSPHRASE:-}"
+LUKS_MAPPER_NAME="copy-config-root"
 MOUNT_DIR=""
 NBD_DEV=""
 
@@ -67,8 +69,20 @@ require_cmd() {
 cleanup() {
   set +e
 
-  if [[ -n "${MOUNT_DIR}" ]] && mountpoint -q "${MOUNT_DIR}"; then
-    umount "${MOUNT_DIR}"
+  if [[ -n "${MOUNT_DIR}" ]]; then
+    for path in dev/pts dev proc sys run; do
+      if mountpoint -q "${MOUNT_DIR}/${path}"; then
+        umount "${MOUNT_DIR}/${path}"
+      fi
+    done
+
+    if mountpoint -q "${MOUNT_DIR}"; then
+      umount "${MOUNT_DIR}"
+    fi
+  fi
+
+  if [[ -e "/dev/mapper/${LUKS_MAPPER_NAME}" ]]; then
+    cryptsetup close "${LUKS_MAPPER_NAME}" >/dev/null 2>&1 || true
   fi
 
   if [[ -n "${NBD_DEV}" ]]; then
@@ -94,6 +108,12 @@ attach_nbd() {
 
   echo "Unable to find a free /dev/nbd device." >&2
   exit 1
+}
+
+mount_bind() {
+  local source=$1
+  local target=$2
+  mount --bind "${source}" "${target}"
 }
 
 find_root_part() {
@@ -126,6 +146,16 @@ mount_root_part() {
   MOUNT_DIR="$(mktemp -d)"
 
   case "${root_fs_type}" in
+    crypto_LUKS)
+      if [[ -z "${LUKS_PASSPHRASE}" ]]; then
+        echo "Set LUKS_PASSPHRASE before copying config to a LUKS image." >&2
+        exit 1
+      fi
+      printf '%s' "${LUKS_PASSPHRASE}" | cryptsetup open "${root_part}" "${LUKS_MAPPER_NAME}" -
+      udevadm settle
+      root_part="/dev/mapper/${LUKS_MAPPER_NAME}"
+      root_fs_type="$(blkid -s TYPE -o value "${root_part}")"
+      ;;&
     btrfs)
       mount -o subvol=@ "${root_part}" "${MOUNT_DIR}"
       ;;
@@ -133,6 +163,41 @@ mount_root_part() {
       mount "${root_part}" "${MOUNT_DIR}"
       ;;
   esac
+}
+
+configure_install_bundle_crontab() {
+  mount_bind /dev "${MOUNT_DIR}/dev"
+  mount_bind /dev/pts "${MOUNT_DIR}/dev/pts"
+  mount_bind /proc "${MOUNT_DIR}/proc"
+  mount_bind /sys "${MOUNT_DIR}/sys"
+  mount_bind /run "${MOUNT_DIR}/run"
+
+  env -i \
+    HOME=/root \
+    PATH=/usr/sbin:/usr/bin:/sbin:/bin \
+    TERM="${TERM:-xterm}" \
+    chroot "${MOUNT_DIR}" /bin/bash <<'CHROOT'
+set -euo pipefail
+
+CRON_ENTRY='@reboot /bin/bash /root/scripts/install-bundle.sh # codex-install-bundle'
+CRON_MARKER='# codex-install-bundle'
+tmp_crontab="$(mktemp)"
+
+if crontab -l > "${tmp_crontab}" 2>/dev/null; then
+  filtered_crontab="$(mktemp)"
+  grep -Fv "${CRON_MARKER}" "${tmp_crontab}" > "${filtered_crontab}" || true
+  mv "${filtered_crontab}" "${tmp_crontab}"
+else
+  : > "${tmp_crontab}"
+fi
+
+if [[ -f /root/scripts/install-bundle.sh ]]; then
+  printf '%s\n' "${CRON_ENTRY}" >> "${tmp_crontab}"
+fi
+
+crontab "${tmp_crontab}"
+rm -f "${tmp_crontab}"
+CHROOT
 }
 
 trap cleanup EXIT
@@ -154,6 +219,8 @@ require_dir "${SCRIPTS_DIR}"
 for cmd in \
   blkid \
   chattr \
+  chroot \
+  cryptsetup \
   modprobe \
   mount \
   mountpoint \
@@ -183,6 +250,8 @@ bash "${STAGE_IMAGE_CONFIG_SCRIPT}" \
   "${SCRIPTS_DIR}" \
   "${INTERFACES_FILE}" \
   "${SOURCES_LIST_FILE}"
+
+configure_install_bundle_crontab
 
 if [[ -e "${MOUNT_DIR}/etc/resolv.conf" ]]; then
   chattr +i "${MOUNT_DIR}/etc/resolv.conf" 2>/dev/null || true

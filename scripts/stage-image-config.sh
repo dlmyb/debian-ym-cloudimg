@@ -50,11 +50,30 @@ install -d -m 0755 \
 
 install -m 0644 "${RESOLV_CONF_FILE}" "${MOUNT_DIR}/etc/resolv.conf"
 
-rm -rf "${MOUNT_DIR}/root/ssh" "${MOUNT_DIR}/root/scripts"
+rm -rf "${MOUNT_DIR}/root/ssh" "${MOUNT_DIR}/root/ssh-host-keys" "${MOUNT_DIR}/root/scripts"
 cp -a "${SSH_DIR}" "${MOUNT_DIR}/root/ssh"
 mkdir -p "${MOUNT_DIR}/root/scripts"
 cp -a "${SCRIPTS_DIR}/." "${MOUNT_DIR}/root/scripts/"
-chown -R root:root "${MOUNT_DIR}/root/ssh" "${MOUNT_DIR}/root/scripts"
+mkdir -p "${MOUNT_DIR}/root/ssh-host-keys" "${MOUNT_DIR}/etc/ssh"
+
+for host_key in "${SSH_DIR}"/ssh_host_*_key; do
+  [[ -f "${host_key}" ]] || continue
+  host_key_name="$(basename "${host_key}")"
+  pub_key="${host_key}.pub"
+
+  install -m 0600 "${host_key}" "${MOUNT_DIR}/etc/ssh/${host_key_name}"
+  install -m 0600 "${host_key}" "${MOUNT_DIR}/root/ssh-host-keys/${host_key_name}"
+
+  if [[ -f "${pub_key}" ]]; then
+    install -m 0644 "${pub_key}" "${MOUNT_DIR}/etc/ssh/${host_key_name}.pub"
+    install -m 0644 "${pub_key}" "${MOUNT_DIR}/root/ssh-host-keys/${host_key_name}.pub"
+  fi
+done
+
+chown -R root:root \
+  "${MOUNT_DIR}/root/ssh" \
+  "${MOUNT_DIR}/root/ssh-host-keys" \
+  "${MOUNT_DIR}/root/scripts"
 
 if [[ -n "${INTERFACES_FILE}" ]]; then
   install -m 0644 "${INTERFACES_FILE}" "${MOUNT_DIR}/etc/network/interfaces"

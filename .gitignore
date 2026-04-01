@@ -1,3 +1,4 @@
 out
 .vscode
 seed
+stage/ssh/ssh_host*

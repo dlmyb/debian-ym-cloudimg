@@ -4,7 +4,8 @@ This repo builds customized Debian 13 amd64 cloud images from a fresh bootstrap 
 
 ## Base image contents
 
-- Debian builders stage `stage/ssh/authorized_keys` as `/root/ssh/authorized_keys`, then the first-boot bundle script restores it to `/root/.ssh/authorized_keys`
+- Debian builders install `stage/ssh/authorized_keys` directly as `/root/.ssh/authorized_keys`
+- Debian builders install `stage/files/sources.list` as `/etc/apt/sources.list` when present
 - packages installed:
   - `cloud-init`
   - `openssh-server`
@@ -52,6 +53,7 @@ make ext4
 ```
 
 The builder writes a qcow2 image into `out/`. Use `make xz TARGET_IMG=...` if you also want a `raw.xz` export.
+If you want the staged overlay under `stage/` applied as well, run `make copy TARGET_IMG=...` after the build.
 
 ## Ext4 build
 
@@ -94,11 +96,13 @@ make ext4
 make btrfs
 make luks-ext4 LUKS_PASSPHRASE=changeme
 make copy TARGET_IMG=out/debian-13-ext4-amd64.qcow2
+make copy TARGET_IMG=out/debian-13-luks-ext4-amd64.qcow2 LUKS_PASSPHRASE=changeme
 make xz TARGET_IMG=out/debian-13-ext4-amd64.qcow2
 ```
 
-`make copy` updates an existing qcow2 in place with the staged config files.
+`make copy` updates an existing qcow2 in place with the staged config files and registers `install-bundle.sh` in root's crontab when present.
 `make xz` converts an existing qcow2 into `raw.xz` in `out/` by default.
+For LUKS images, pass `LUKS_PASSPHRASE=...` to `make copy`.
 You can also use `target_img=...` instead of `TARGET_IMG=...`, and `OUTPUT_IMG=...` or `output_img=...` to override the `make xz` output path.
 
 ## LUKS ext4 build
@@ -120,7 +124,8 @@ At boot, connect to the initramfs SSH server and run `cryptroot-unlock` to unloc
 
 ## Stage workflow
 
-Update the files under `stage/` when you want to change what gets copied into the image:
+Builders only bake the root SSH authorized key and optional `sources.list`.
+Update the files under `stage/` when you want to change the rest of the config copied into the image:
 
 ```bash
 stage/ssh/authorized_keys
@@ -136,6 +141,12 @@ If you already have a qcow2 image and only want to refresh the staged files with
 make copy TARGET_IMG=out/debian-13-ext4-amd64.qcow2
 ```
 
+For a LUKS image:
+
+```bash
+make copy TARGET_IMG=out/debian-13-luks-ext4-amd64.qcow2 LUKS_PASSPHRASE=changeme
+```
+
 If you then need a `raw.xz` artifact:
 
 ```bash
@@ -144,12 +155,11 @@ make xz TARGET_IMG=out/debian-13-ext4-amd64.qcow2
 
 All builders assume a BIOS/QEMU boot path.
 The Debian builders use `grub-pc`.
-The Debian builders use `ifupdown` with `stage/files/interfaces` as the active network config.
+The Debian builders install `ifupdown`.
 
-The Debian builders copy `stage/scripts/debian/` into `/root/scripts` inside the image, and copy `stage/ssh/` into `/root/ssh`.
-If `/root/scripts/install-bundle.sh` exists, each builder registers it in root's crontab with `@reboot`; it waits 60 seconds on Debian, runs once, and removes its own crontab entry when finished.
-All builders copy `stage/files/resolv.conf` into `/etc/resolv.conf`.
-The Debian builders mark it immutable.
+`make copy` copies `stage/scripts/debian/` into `/root/scripts` inside the image, copies `stage/ssh/` into `/root/ssh`, copies `stage/ssh/ssh_host_*_key(.pub)` into both `/etc/ssh` and `/root/ssh-host-keys`, copies `stage/files/resolv.conf` into `/etc/resolv.conf`, installs `stage/files/interfaces` as the active `/etc/network/interfaces`, and installs `stage/files/sources.list` as `/etc/apt/sources.list` when present.
+If `/root/scripts/install-bundle.sh` exists after `make copy`, the copy script registers it in root's crontab with `@reboot`; it waits 60 seconds on Debian, runs once, and removes its own crontab entry when finished.
+The copy script marks `/etc/resolv.conf` immutable after staging it.
 The btrfs Debian image also installs `btrbk`, writes `/etc/btrbk/btrbk.conf`, and runs it from `/etc/cron.hourly/btrbk` to snapshot `/` into `/.snapshots/btrbk` with retention `24h 7d 0w 0m 0y`.
 The repository also vendors the upstream `reinstall` project as a submodule in `reinstall/` for reference and integration with the produced raw images.
 

@@ -12,7 +12,7 @@ help:
 	  'make ext4                          Build a new ext4 cloud image' \
 	  'make btrfs                         Build a new btrfs cloud image' \
 	  'make luks-ext4 LUKS_PASSPHRASE=... Build a new LUKS ext4 cloud image with dropbear-initramfs unlock' \
-	  'make copy TARGET_IMG=out/img.qcow2 Copy config into an existing qcow2 image' \
+	  'make copy TARGET_IMG=out/img.qcow2 Copy staged config into an existing qcow2 image' \
 	  'make xz TARGET_IMG=out/img.qcow2   Convert qcow2 to raw.xz'
 
 ext4:
@@ -27,7 +27,7 @@ luks-ext4:
 
 copy:
 	@if [[ -z "$(IMAGE)" ]]; then echo 'Set TARGET_IMG=/path/to/image.qcow2 or target_img=/path/to/image.qcow2'; exit 1; fi
-	$(SUDO) ./scripts/image/copy-config-to-qcow2.sh "$(IMAGE)"
+	$(SUDO) env LUKS_PASSPHRASE="$(LUKS_PASSPHRASE)" ./scripts/image/copy-config-to-qcow2.sh "$(IMAGE)"
 
 xz:
 	@if [[ -z "$(IMAGE)" ]]; then echo 'Set TARGET_IMG=/path/to/image.qcow2 or target_img=/path/to/image.qcow2'; exit 1; fi

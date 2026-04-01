@@ -8,26 +8,15 @@ DISK_SIZE="${DISK_SIZE:-5G}"
 OUT_QCOW2="debian-${DEBIAN_VER}-luks-ext4-${ARCH}.qcow2"
 
 SSH_DIR="$(realpath "${SSH_DIR:-stage/ssh}")"
-RESOLV_CONF_FILE="$(realpath "${RESOLV_CONF_FILE:-stage/files/resolv.conf}")"
-SCRIPTS_DIR="$(realpath "${SCRIPTS_DIR:-stage/scripts/debian}")"
-STAGE_IMAGE_CONFIG_SCRIPT="$(realpath "${STAGE_IMAGE_CONFIG_SCRIPT:-scripts/stage-image-config.sh}")"
+BASE_IMAGE_CONFIG_SCRIPT="$(realpath "${BASE_IMAGE_CONFIG_SCRIPT:-scripts/install-base-image-config.sh}")"
 WORKDIR="${WORKDIR:-$PWD/out}"
-HOSTNAME="${HOSTNAME:-build}"
+HOSTNAME="DEBIAN_LUKS"
 IMAGE_LOCALE="${IMAGE_LOCALE:-en_US.UTF-8}"
+KERNEL_IP_CONFIG="${KERNEL_IP_CONFIG:-dhcp}"
 LUKS_NAME="${LUKS_NAME:-cryptroot}"
 LUKS_PASSPHRASE="${LUKS_PASSPHRASE:-}"
 MOUNT_DIR=""
 NBD_DEV=""
-
-INTERFACES_FILE="${INTERFACES_FILE:-stage/files/interfaces}"
-if [[ -f "${INTERFACES_FILE}" ]]; then
-  INTERFACES_FILE="$(realpath "${INTERFACES_FILE}")"
-elif [[ "${INTERFACES_FILE}" == "stage/files/interfaces" ]]; then
-  INTERFACES_FILE=""
-else
-  echo "Missing optional interfaces file: ${INTERFACES_FILE}" >&2
-  exit 1
-fi
 
 SOURCES_LIST_FILE="${SOURCES_LIST_FILE:-stage/files/sources.list}"
 if [[ -f "${SOURCES_LIST_FILE}" ]]; then
@@ -138,17 +127,12 @@ mount_bind() {
 
 trap cleanup EXIT
 require_root
-require_file "${RESOLV_CONF_FILE}"
-require_file "${STAGE_IMAGE_CONFIG_SCRIPT}"
+require_file "${BASE_IMAGE_CONFIG_SCRIPT}"
 if [[ ! -d "${SSH_DIR}" ]]; then
   echo "Missing required directory: ${SSH_DIR}" >&2
   exit 1
 fi
 require_file "${SSH_DIR}/authorized_keys"
-if [[ ! -d "${SCRIPTS_DIR}" ]]; then
-  echo "Missing required directory: ${SCRIPTS_DIR}" >&2
-  exit 1
-fi
 
 if [[ -z "${LUKS_PASSPHRASE}" ]]; then
   echo "Set LUKS_PASSPHRASE before running this builder." >&2
@@ -239,20 +223,17 @@ ff02::1 ip6-allnodes
 ff02::2 ip6-allrouters
 EOF
 
-cat > "${MOUNT_DIR}/etc/default/grub" <<'EOF'
+cat > "${MOUNT_DIR}/etc/default/grub" <<EOF
 GRUB_DEFAULT=0
 GRUB_TIMEOUT=1
-GRUB_DISTRIBUTOR=`dpkg-query -W -f='${binary:Package}\n' 'grub*' | head -n1 | cut -d- -f1`
-GRUB_CMDLINE_LINUX_DEFAULT="console=ttyS0,115200n8 net.ifnames=0 biosdevname=0 ip=dhcp"
-GRUB_CMDLINE_LINUX="console=tty0 console=ttyS0,115200n8 net.ifnames=0 biosdevname=0 ip=dhcp"
+GRUB_DISTRIBUTOR=\`dpkg-query -W -f='\${binary:Package}\n' 'grub*' | head -n1 | cut -d- -f1\`
+GRUB_CMDLINE_LINUX_DEFAULT="console=ttyS0,115200n8 net.ifnames=0 biosdevname=0 ip=${KERNEL_IP_CONFIG}"
+GRUB_CMDLINE_LINUX="console=tty0 console=ttyS0,115200n8 net.ifnames=0 biosdevname=0 ip=${KERNEL_IP_CONFIG}"
 EOF
 
-bash "${STAGE_IMAGE_CONFIG_SCRIPT}" \
+bash "${BASE_IMAGE_CONFIG_SCRIPT}" \
   "${MOUNT_DIR}" \
-  "${RESOLV_CONF_FILE}" \
   "${SSH_DIR}" \
-  "${SCRIPTS_DIR}" \
-  "${INTERFACES_FILE}" \
   "${SOURCES_LIST_FILE}"
 
 mount_bind /dev "${MOUNT_DIR}/dev"
@@ -270,6 +251,7 @@ env -i \
   LC_ALL=C.UTF-8 \
   NBD_DEV="${NBD_DEV}" \
   IMAGE_LOCALE="${IMAGE_LOCALE}" \
+  KERNEL_IP_CONFIG="${KERNEL_IP_CONFIG}" \
   LUKS_NAME="${LUKS_NAME}" \
   chroot "${MOUNT_DIR}" /bin/bash <<'CHROOT'
 set -euo pipefail
@@ -331,26 +313,16 @@ mkdir -p /etc/systemd/system/getty.target.wants
 ln -sf "$(unit_path serial-getty@.service)" /etc/systemd/system/getty.target.wants/serial-getty@ttyS0.service
 
 install -d -m 0700 /etc/dropbear/initramfs
-install -m 0600 /root/ssh/authorized_keys /etc/dropbear/initramfs/authorized_keys
+install -m 0600 /root/.ssh/authorized_keys /etc/dropbear/initramfs/authorized_keys
 
 cat > /etc/dropbear/initramfs/dropbear.conf <<'EOF'
 DROPBEAR_OPTIONS="-j -k -s -I 300"
 EOF
 
-cat > /etc/initramfs-tools/conf.d/network.conf <<'EOF'
+cat > /etc/initramfs-tools/conf.d/network.conf <<EOF
 DEVICE=eth0
-IP=dhcp
+IP=${KERNEL_IP_CONFIG}
 EOF
-
-chown root:root /etc/resolv.conf
-chmod 0644 /etc/resolv.conf
-chattr +i /etc/resolv.conf
-
-cat > /tmp/root-crontab <<'EOF'
-@reboot /bin/bash /root/scripts/install-bundle.sh # codex-install-bundle
-EOF
-crontab /tmp/root-crontab
-rm -f /tmp/root-crontab
 
 echo "grub-pc grub-pc/install_devices ${NBD_DEV}" | debconf-set-selections
 echo "grub-pc grub-pc/install_devices_empty boolean false" | debconf-set-selections
@@ -362,11 +334,11 @@ CHROOT
 
 release_image
 
-printf '%s\n' "${LUKS_PASSPHRASE}" | virt-sysprep \
-  --key all:file:/dev/stdin \
-  -a "${OUT_QCOW2}" \
-  --operations machine-id,ssh-hostkeys,tmp-files,logfiles,package-manager-cache
-
+# printf '%s\n' "${LUKS_PASSPHRASE}" | virt-sysprep \
+#   --key all:file:/dev/stdin \
+#   -a "${OUT_QCOW2}" \
+#   --operations machine-id,ssh-hostkeys,tmp-files,logfiles,package-manager-cache
+# 
 echo "Built artifact:"
 ls -lh "${OUT_QCOW2}"
 echo "Remote unlock: SSH to the initramfs on port 22, then run cryptroot-unlock."
